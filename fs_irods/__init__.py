@@ -7,6 +7,6 @@ logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 __author__ = "Helge Hecht"
 __email__ = "helge.hecht@recetox.muni.cz"
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = ["iRODSFS", "can_create"]

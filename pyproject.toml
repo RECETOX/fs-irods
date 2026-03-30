@@ -9,7 +9,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "fs-irods"
-version = "0.3.0"
+version = "0.3.1"
 description = "PyFilesystem2 extension for iRODS"
 authors = ["Helge Hecht <helge.hecht@recetox.muni.cz>"]
 readme = "README.md"
