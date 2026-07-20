@@ -421,11 +421,11 @@ def test_fsid(fs: IRODSFileSystem):
 
 
 def test_wrap(fs: IRODSFileSystem):
-    """Test path wrapping."""
-    # Test various path formats
+    """Test path wrapping delegates correctly to iRODSPath."""
     assert fs.wrap("/tempZone") == "/tempZone"
-    assert fs.wrap("subdir") == "/tempZone/subdir"
-    assert fs.wrap("/subdir") == "/tempZone/subdir"
+    assert fs.wrap("subdir") == "/subdir"
+    assert fs.wrap("/subdir") == "/subdir"
+    assert fs.wrap("irods://host:1247/tempZone/path") == "/tempZone/path"
 
 
 def test_strip_protocol():
@@ -633,9 +633,9 @@ class TestIRODSFSSpecIntegration:
             content = fs.cat_file(f"{deep_path}/file.txt")
             assert content == b"deep file"
 
-            # List intermediate
+            # List intermediate - ls returns full paths
             items = fs.ls(f"{base}/a/b", detail=False)
-            assert "c" in items
+            assert f"{base}/a/b/c" in items
         finally:
             if fs.exists(base):
                 fs.rm(base, recursive=True)
