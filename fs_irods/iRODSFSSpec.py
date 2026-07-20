@@ -325,10 +325,11 @@ class IRODSFileSystem(AbstractFileSystem):
         # Set root path
         self._root = root if root is not None else f"/{zone}"
 
-        # Register this instance for cleanup
-        fs_instances[self] = None
-
         super().__init__(*args, **kwargs)
+
+        # NOTE: fs_instances[self] = None cannot happen here because
+        # _fs_token_ is None until _Cached.__call__ sets it after __init__
+        # returns. Registration is deferred until _open().
 
     @property
     def _session(self) -> iRODSSession:
@@ -455,14 +456,35 @@ class IRODSFileSystem(AbstractFileSystem):
         Args:
             path: Path to the collection to create.
             create_parents: If True, create parent collections as needed.
+                If False, raises when the path already exists or the
+                parent collection does not exist.
             **kwargs: Additional keyword arguments.
+
+        Raises:
+            FileExistsError: If the collection already exists and
+                ``create_parents`` is False.
+            FileNotFoundError: If a parent collection does not exist and
+                ``create_parents`` is False.
         """
         path = self.wrap(path)
 
         with self._lock:
             if self.session.collections.exists(path):
+                if not create_parents:
+                    raise FileExistsError(
+                        f"Collection already exists: {path}"
+                    )
                 _logger.debug("Collection %s already exists", path)
                 return
+
+            if not create_parents:
+                parent_path = self._parent(path)
+                if parent_path and not self.session.collections.exists(
+                    self.wrap(parent_path)
+                ):
+                    raise FileNotFoundError(
+                        f"Parent collection does not exist: {parent_path}"
+                    )
 
             _logger.debug("Creating collection %s", path)
             self.session.collections.create(path, recurse=create_parents)
@@ -497,10 +519,15 @@ class IRODSFileSystem(AbstractFileSystem):
         Args:
             path: Path to the collection to remove.
             recursive: If True, remove contents recursively.
+
+        Raises:
+            FileNotFoundError: If the path does not exist.
         """
         path = self.wrap(path)
 
         with self._lock:
+            if not self.session.collections.exists(path):
+                raise FileNotFoundError(f"No such collection: {path}")
             self.session.collections.remove(path, recurse=recursive)
 
         self.invalidate_cache(self._parent(path))
@@ -510,10 +537,15 @@ class IRODSFileSystem(AbstractFileSystem):
 
         Args:
             path: Path to the data object to remove.
+
+        Raises:
+            FileNotFoundError: If the path does not exist.
         """
         path = self.wrap(path)
 
         with self._lock:
+            if not self.session.data_objects.exists(path):
+                raise FileNotFoundError(f"No such file: {path}")
             self.session.data_objects.unlink(path)
 
         self.invalidate_cache(self._parent(path))
@@ -620,6 +652,10 @@ class IRODSFileSystem(AbstractFileSystem):
         """
         if not autocommit:
             raise NotImplementedError("Only autocommit=True operations are supported")
+
+        # Lazy registration: _fs_token_ is only valid after _Cached.__call__
+        # sets it post-__init__, so we register here instead of in __init__.
+        fs_instances[self] = None
 
         path = self.wrap(path)
         return IRODSFile(self, path, mode=mode, **kwargs)
@@ -812,13 +848,18 @@ class IRODSFileSystem(AbstractFileSystem):
 
         Returns:
             Size in bytes.
+
+        Raises:
+            FileNotFoundError: If the path does not exist or is not a file.
         """
         path = self.wrap(path)
 
         with self._lock:
-            if self.session.data_objects.exists(path):
-                return self.session.data_objects.get(path).size
-            raise FileNotFoundError(f"Not a file: {path}")
+            if not self.exists(path):
+                raise FileNotFoundError(f"No such file: {path}")
+            if not self.session.data_objects.exists(path):
+                raise FileNotFoundError(f"Not a file: {path}")
+            return self.session.data_objects.get(path).size
 
     def touch(self, path: str, truncate: bool = True, **kwargs: Any) -> None:
         """Create an empty file or update timestamp.
@@ -827,11 +868,24 @@ class IRODSFileSystem(AbstractFileSystem):
             path: Path to the file.
             truncate: If True, set file size to 0.
             **kwargs: Additional keyword arguments.
+
+        Raises:
+            FileNotFoundError: If the parent collection does not exist.
+            IsADirectoryError: If the path points to an existing collection.
         """
         path = self.wrap(path)
 
         with self._lock:
             if not self.session.data_objects.exists(path):
+                # Check that the parent collection exists
+                parent_path = self._parent(path)
+                if parent_path and not self.session.collections.exists(
+                    self.wrap(parent_path)
+                ):
+                    raise FileNotFoundError(
+                        f"Parent collection does not exist: {parent_path}"
+                    )
+
                 _logger.debug("Creating empty data object %s", path)
                 self.session.data_objects.create(path)
                 self.invalidate_cache(self._parent(path))
@@ -983,6 +1037,15 @@ class IRODSFileSystem(AbstractFileSystem):
             self._session.cleanup()
         if self in fs_instances:
             del fs_instances[self]
+
+    def __enter__(self):
+        """Enter context manager."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit context manager and close the filesystem."""
+        self.close()
+        return False
 
     def __str__(self) -> str:
         """String representation of the filesystem."""
