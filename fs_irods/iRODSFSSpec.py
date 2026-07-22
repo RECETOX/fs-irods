@@ -840,6 +840,26 @@ class IRODSFileSystem(AbstractFileSystem):
         with self._lock:
             return self.session.data_objects.exists(path)
 
+    def checksum(self, path: str) -> Optional[str]:
+        """Get the checksum of a file.
+
+        Args:
+            path: Path to the file.
+
+        Returns:
+            Checksum string (e.g., "sha256:abc123...") or None if not available.
+
+        Raises:
+            FileNotFoundError: If the path does not exist or is not a file.
+        """
+        path = self.wrap(path)
+
+        with self._lock:
+            if not self.session.data_objects.exists(path):
+                raise FileNotFoundError(f"No such file: {path}")
+            data_obj = self.session.data_objects.get(path)
+            return data_obj.checksum
+
     def size(self, path: str) -> int:
         """Get the size of a file.
 
