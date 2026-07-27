@@ -323,7 +323,7 @@ class IRODSFileSystem(AbstractFileSystem):
             self._owns_session = False
 
         # Set root path
-        self._root = root if root is not None else f"/{zone}"
+        self._root = root if root is not None else f"/{self.zone}"
 
         super().__init__(*args, **kwargs)
 
@@ -436,6 +436,10 @@ class IRODSFileSystem(AbstractFileSystem):
             Full iRODS path.
         """
         path = self._strip_protocol(path)
+        # If path is already absolute and starts with root, use it directly
+        # to avoid duplicating the root (e.g., /tempZone/tempZone/file.txt)
+        if path.startswith(self._root):
+            return str(iRODSPath(path))
         return str(iRODSPath(self._root, path))
 
     def invalidate_cache(self, path: Optional[str] = None):
@@ -474,7 +478,6 @@ class IRODSFileSystem(AbstractFileSystem):
                     raise FileExistsError(
                         f"Collection already exists: {path}"
                     )
-                _logger.debug("Collection %s already exists", path)
                 return
 
             if not create_parents:
@@ -486,10 +489,8 @@ class IRODSFileSystem(AbstractFileSystem):
                         f"Parent collection does not exist: {parent_path}"
                     )
 
-            _logger.debug("Creating collection %s", path)
             self.session.collections.create(path, recurse=create_parents)
 
-        # Invalidate parent cache
         self.invalidate_cache(self._parent(path))
 
     def makedirs(self, path: str, exist_ok: bool = False) -> None:
@@ -712,16 +713,13 @@ class IRODSFileSystem(AbstractFileSystem):
         entries: List[Dict[str, Any]] = []
 
         with self._lock:
-            # Check if it's a data object first
             if self.session.data_objects.exists(path):
                 data_obj = self.session.data_objects.get(path)
                 entries.append(self._data_object_info(data_obj))
             elif self.session.collections.exists(path):
                 collection = self.session.collections.get(path)
-                # Add subcollections
                 for subcoll in collection.subcollections:
                     entries.append(self._collection_info(subcoll))
-                # Add data objects
                 for data_obj in collection.data_objects:
                     entries.append(self._data_object_info(data_obj))
             else:
@@ -890,14 +888,17 @@ class IRODSFileSystem(AbstractFileSystem):
             **kwargs: Additional keyword arguments.
 
         Raises:
-            FileNotFoundError: If the parent collection does not exist.
             IsADirectoryError: If the path points to an existing collection.
+            FileNotFoundError: If the parent collection does not exist.
+            FileExistsError: If the file already exists and truncate is False.
         """
         path = self.wrap(path)
 
         with self._lock:
+            if self.session.collections.exists(path):
+                raise IsADirectoryError(f"Path is a collection, not a data object: {path}")
+
             if not self.session.data_objects.exists(path):
-                # Check that the parent collection exists
                 parent_path = self._parent(path)
                 if parent_path and not self.session.collections.exists(
                     self.wrap(parent_path)
@@ -906,19 +907,16 @@ class IRODSFileSystem(AbstractFileSystem):
                         f"Parent collection does not exist: {parent_path}"
                     )
 
-                _logger.debug("Creating empty data object %s", path)
                 self.session.data_objects.create(path)
                 self.invalidate_cache(self._parent(path))
                 return
 
-            if self.session.collections.exists(path):
-                raise IsADirectoryError(f"Path is a collection, not a data object: {path}")
-
             if truncate:
-                _logger.debug("Truncating data object %s", path)
                 self.session.data_objects.truncate(path, size=0)
+                self.session.data_objects.touch(path, **kwargs)
+            else:
+                raise FileExistsError(f"Data object already exists: {path}")
 
-            self.session.data_objects.touch(path, **kwargs)
 
     def modified(self, path: str) -> datetime.datetime:
         """Return the modification timestamp of a file.
