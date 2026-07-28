@@ -371,8 +371,8 @@ def test_rm_file_exceptions(_fs: IRODSFileSystem):
 @pytest.mark.parametrize(
     "src_path, dst_path",
     [
-        ["/tempZone/existing_collection", "/tempZone/new_copy"],
-        ["/tempZone/existing_file.txt", "/tempZone/home/new_file.txt"],
+        ["/tempZone/existing_collection", "/tempZone/dst_collection"],
+        ["/tempZone/existing_file.txt", "/tempZone/home/dst_file.txt"],
     ],
 )
 def test_cp_file(_fs: IRODSFileSystem, src_path: str, dst_path: str):
@@ -409,8 +409,8 @@ def test_cp_file_exceptions(_fs: IRODSFileSystem, src_path: str):
 @pytest.mark.parametrize(
     "src, dst",
     [
-        ["/tempZone/existing_file.txt", "/tempZone/home/mv_existing_file.txt"],
-        ["/tempZone/existing_collection", "/tempZone/home/existing_collection"],
+        ["/tempZone/existing_file.txt", "/tempZone/home/dst_file.txt"],
+        ["/tempZone/existing_collection", "/tempZone/home/dst_collection"],
     ],
 )
 def test_mv_file(_fs: IRODSFileSystem, src: str, dst: str):
@@ -433,8 +433,8 @@ def test_mv_file(_fs: IRODSFileSystem, src: str, dst: str):
 @pytest.mark.parametrize(
     "src, dst",
     [
-        ["/tempZone/i_dont_exist.txt", "/tempZone/destination.txt"],
-        ["/tempZone/i_dont_exist", "/tempZone/home/destination"],
+        ["/tempZone/i_dont_exist.txt", "/tempZone/dst_file.txt"],
+        ["/tempZone/i_dont_exist", "/tempZone/home/dst_collection"],
     ],
 )
 def test_mv_file_exceptions(_fs: IRODSFileSystem, src: str, dst: str):
@@ -457,16 +457,12 @@ def test_cat_file(_fs: IRODSFileSystem):
 
 def test_pipe_file(_fs: IRODSFileSystem):
     """Test writing bytes to a file."""
-    test_path = "/tempZone/piped_file.txt"
-    try:
-        test_content = b"test content for piping"
-        _fs.pipe_file(test_path, test_content)
+    test_path = "/tempZone/existing_file.txt"
+    test_content = b"test content for piping"
+    _fs.pipe_file(test_path, test_content)
 
-        read_content = _fs.cat_file(test_path)
-        assert read_content == test_content
-    finally:
-        if _fs.exists(test_path):
-            _fs.rm_file(test_path)
+    read_content = _fs.cat_file(test_path)
+    assert read_content == test_content
 
 
 # =============================================================================
@@ -488,27 +484,19 @@ def test_open_read(_fs: IRODSFileSystem, path: str, expected: bytes):
 
 def test_open_write(_fs: IRODSFileSystem):
     """Test opening a file for writing."""
-    test_path = "/tempZone/open_write_test.txt"
-    try:
-        with _fs.open(test_path, "wb") as f:
-            f.write(b"written content")
-        assert _fs.cat_file(test_path) == b"written content"
-    finally:
-        if _fs.exists(test_path):
-            _fs.rm_file(test_path)
+    test_path = "/tempZone/existing_file.txt"
+    with _fs.open(test_path, "wb") as f:
+        f.write(b"written content")
+    assert _fs.cat_file(test_path) == b"written content"
 
 
 def test_open_append(_fs: IRODSFileSystem):
     """Test opening a file for appending."""
-    test_path = "/tempZone/open_append_test.txt"
-    try:
-        _fs.pipe_file(test_path, b"first ")
-        with _fs.open(test_path, "ab") as f:
-            f.write(b"appended")
-        assert _fs.cat_file(test_path) == b"first appended"
-    finally:
-        if _fs.exists(test_path):
-            _fs.rm_file(test_path)
+    test_path = "/tempZone/existing_file.txt"
+    _fs.pipe_file(test_path, b"first ")
+    with _fs.open(test_path, "ab") as f:
+        f.write(b"appended")
+    assert _fs.cat_file(test_path) == b"first appended"
 
 
 def test_open_autocommit_not_implemented(_fs: IRODSFileSystem):
@@ -601,13 +589,11 @@ def test_find(_fs: IRODSFileSystem):
     """Test finding all files recursively."""
     base = "/tempZone/find_test"
     try:
-        # Create a nested structure
         _fs.makedirs(f"{base}/a/b/c")
         _fs.pipe_file(f"{base}/file1.txt", b"content1")
         _fs.pipe_file(f"{base}/a/file2.txt", b"content2")
         _fs.pipe_file(f"{base}/a/b/file3.txt", b"content3")
 
-        # Find all files
         result = _fs.find(base)
         assert isinstance(result, list)
         assert len(result) == 3
@@ -615,21 +601,15 @@ def test_find(_fs: IRODSFileSystem):
         assert f"{base}/a/file2.txt" in result
         assert f"{base}/a/b/file3.txt" in result
 
-        # Find with directories included
         result_with_dirs = _fs.find(base, withdirs=True)
         assert isinstance(result_with_dirs, list)
-        assert len(result_with_dirs) >= 3  # Files plus possibly directories
+        assert len(result_with_dirs) >= 3
 
-        # Find with maxdepth
         result_depth1 = _fs.find(base, maxdepth=1)
         assert isinstance(result_depth1, list)
-        # Should only find file1.txt at depth 1, not files in subdirectories
         assert f"{base}/file1.txt" in result_depth1
 
-        # Find with detail - fsspec may return list of dicts or dict of dicts
         result_detail = _fs.find(base, detail=True)
-        # When detail=True, result is either a dict mapping paths to info,
-        # or a list of info dicts depending on fsspec version
         if isinstance(result_detail, dict):
             assert len(result_detail) == 3
         elif isinstance(result_detail, list):
@@ -663,16 +643,13 @@ def test_walk(_fs: IRODSFileSystem):
     """Test walking directory tree."""
     base = "/tempZone/walk_test"
     try:
-        # Create a nested structure
         _fs.makedirs(f"{base}/a/b")
         _fs.pipe_file(f"{base}/file1.txt", b"content1")
         _fs.pipe_file(f"{base}/a/file2.txt", b"content2")
         _fs.pipe_file(f"{base}/a/b/file3.txt", b"content3")
 
-        # Walk the directory tree
         results = list(_fs.walk(base))
 
-        # Should yield tuples of (path, dirs, files)
         assert len(results) > 0
         for entry in results:
             assert len(entry) == 3
@@ -681,7 +658,6 @@ def test_walk(_fs: IRODSFileSystem):
             assert isinstance(dirs, list)
             assert isinstance(files, list)
 
-        # Verify we visited the root
         root_entry = results[0]
         assert root_entry[0] == base
     finally:
@@ -693,21 +669,17 @@ def test_walk_maxdepth(_fs: IRODSFileSystem):
     """Test walk with maxdepth limit."""
     base = "/tempZone/walk_depth_test"
     try:
-        # Create a nested structure
         _fs.makedirs(f"{base}/a/b/c")
         _fs.pipe_file(f"{base}/file1.txt", b"content1")
         _fs.pipe_file(f"{base}/a/file2.txt", b"content2")
         _fs.pipe_file(f"{base}/a/b/file3.txt", b"content3")
         _fs.pipe_file(f"{base}/a/b/c/file4.txt", b"content4")
 
-        # Walk with maxdepth=1
         results = list(_fs.walk(base, maxdepth=1))
 
-        # Should only visit root level
         assert len(results) >= 1
         for entry in results:
             path = entry[0]
-            # No path should be deeper than one level
             depth = path.count("/") - base.count("/")
             assert depth <= 1
     finally:
@@ -723,17 +695,14 @@ def test_du(_fs: IRODSFileSystem):
     """Test disk usage calculation."""
     base = "/tempZone/du_test"
     try:
-        # Create files with known sizes
         _fs.makedirs(base)
         _fs.pipe_file(f"{base}/file1.txt", b"x" * 100)
         _fs.pipe_file(f"{base}/file2.txt", b"x" * 200)
 
-        # Get total size
         total = _fs.du(base)
         assert isinstance(total, int)
         assert total == 300
 
-        # Get per-file sizes
         sizes = _fs.du(base, total=False)
         assert isinstance(sizes, dict)
         assert f"{base}/file1.txt" in sizes
@@ -741,14 +710,11 @@ def test_du(_fs: IRODSFileSystem):
         assert sizes[f"{base}/file1.txt"] == 100
         assert sizes[f"{base}/file2.txt"] == 200
 
-        # With maxdepth
         _fs.makedirs(f"{base}/subdir")
         _fs.pipe_file(f"{base}/subdir/file3.txt", b"x" * 50)
 
-        # Limited depth should not include subdir contents
         shallow = _fs.du(base, maxdepth=1, total=False)
         assert isinstance(shallow, dict)
-        # file1.txt and file2.txt should be included
         assert f"{base}/file1.txt" in shallow
         assert f"{base}/file2.txt" in shallow
     finally:
@@ -776,20 +742,15 @@ def test_du_empty(_fs: IRODSFileSystem):
 def test_finalize_files(_fs: IRODSFileSystem):
     """Test file handle finalization."""
     # Open a file but don't close it explicitly
-    test_path = "/tempZone/finalize_test.txt"
-    try:
-        _fs.pipe_file(test_path, b"test content")
+    test_path = "/tempZone/existing_file.txt"
 
-        _ = _fs.open(test_path, "rb")
-        # Don't close - rely on finalization
+    _ = _fs.open(test_path, "rb")
+    # Don't close - rely on finalization
 
-        # Call finalization
-        _fs._finalize_files()
+    # Call finalization
+    _fs._finalize_files()
 
-        # Should not raise
-    finally:
-        if _fs.exists(test_path):
-            _fs.rm_file(test_path)
+    # Should not raise
 
 
 def test_close_removes_from_instances(_fs: IRODSFileSystem):
@@ -852,115 +813,72 @@ def test_get_kwargs_from_urls(_fs: IRODSFileSystem):
 # IRODSFile Class Tests
 # =============================================================================
 
-class TestIRODSFile:
-    """Tests for the IRODSFile class."""
+def test_file_read(_fs: IRODSFileSystem):
+    """Test reading from an IRODSFile."""
+    test_path = "/tempZone/existing_file.txt"
+    with _fs.open(test_path, "rb") as f:
+        assert f.readable()
+        data = f.read()
+        assert data == b"initial content"
 
-    @pytest.fixture
-    def _fs(self):
-        """Create a filesystem for file tests."""
-        builder: iRODSFSBuilder = iRODSFSBuilder().with_root("/")
-        session = builder._session
-        sut = IRODSFileSystem(session=session, root="/")
-        yield sut
-        sut.close()
-        session.cleanup()
 
-    def test_file_read(self, _fs: IRODSFileSystem):
-        """Test reading from an IRODSFile."""
-        test_path = "/tempZone/file_read_test.txt"
-        try:
-            _fs.pipe_file(test_path, b"test data")
+def test_file_write(_fs: IRODSFileSystem):
+    """Test writing to an IRODSFile."""
+    test_path = "/tempZone/existing_file.txt"
+    with _fs.open(test_path, "wb") as f:
+        assert f.writable()
+        written = f.write(b"new data")
+        assert written > 0
 
-            with _fs.open(test_path, "rb") as f:
-                assert f.readable()
-                data = f.read()
-                assert data == b"test data"
-        finally:
-            if _fs.exists(test_path):
-                _fs.rm_file(test_path)
+    content = _fs.cat_file(test_path)
+    assert content == b"new data"
 
-    def test_file_write(self, _fs: IRODSFileSystem):
-        """Test writing to an IRODSFile."""
-        test_path = "/tempZone/file_write_test.txt"
-        try:
-            with _fs.open(test_path, "wb") as f:
-                assert f.writable()
-                written = f.write(b"new data")
-                assert written > 0
 
-            content = _fs.cat_file(test_path)
-            assert content == b"new data"
-        finally:
-            if _fs.exists(test_path):
-                _fs.rm_file(test_path)
+def test_file_seek_tell(_fs: IRODSFileSystem):
+    """Test seeking and telling in a file."""
+    test_path = "/tempZone/existing_file.txt"
+    with _fs.open(test_path, "rb") as f:
+        pos = f.tell()
+        assert pos == 0
 
-    def test_file_seek_tell(self, _fs: IRODSFileSystem):
-        """Test seeking and telling in a file."""
-        test_path = "/tempZone/file_seek_test.txt"
-        try:
-            _fs.pipe_file(test_path, b"0123456789")
+        f.seek(5)
+        pos = f.tell()
+        assert pos == 5
 
-            with _fs.open(test_path, "rb") as f:
-                pos = f.tell()
-                assert pos == 0
+        f.seek(-3, 2)  # Seek to 3 bytes before end
+        pos = f.tell()
+        assert pos == 12
 
-                f.seek(5)
-                pos = f.tell()
-                assert pos == 5
 
-                f.seek(-3, 2)  # Seek to 3 bytes before end
-                pos = f.tell()
-                assert pos == 7
-        finally:
-            if _fs.exists(test_path):
-                _fs.rm_file(test_path)
+def test_file_context_manager(_fs: IRODSFileSystem):
+    """Test file as context manager."""
+    test_path = "/tempZone/existing_file.txt"
+    with _fs.open(test_path, "rb") as f:
+        assert not f.closed
+        data = f.read()
 
-    def test_file_context_manager(self, _fs: IRODSFileSystem):
-        """Test file as context manager."""
-        test_path = "/tempZone/file_context_test.txt"
-        try:
-            _fs.pipe_file(test_path, b"context test")
+    assert f.closed
+    assert data == b"initial content"
 
-            with _fs.open(test_path, "rb") as f:
-                assert not f.closed
-                data = f.read()
 
-            assert f.closed
-            assert data == b"context test"
-        finally:
-            if _fs.exists(test_path):
-                _fs.rm_file(test_path)
+def test_file_closed_property(_fs: IRODSFileSystem):
+    """Test file closed property."""
+    test_path = "/tempZone/existing_file.txt"
+    f = _fs.open(test_path, "rb")
+    assert not f.closed
 
-    def test_file_closed_property(self, _fs: IRODSFileSystem):
-        """Test file closed property."""
-        test_path = "/tempZone/file_closed_test.txt"
-        try:
-            _fs.pipe_file(test_path, b"test")
+    f.close()
+    assert f.closed
 
-            f = _fs.open(test_path, "rb")
-            assert not f.closed
 
-            f.close()
-            assert f.closed
-        finally:
-            if _fs.exists(test_path):
-                _fs.rm_file(test_path)
+def test_file_readable_writable_seekable(_fs: IRODSFileSystem):
+    """Test file capability methods."""
+    test_path = "/tempZone/existing_file.txt"
+    with _fs.open(test_path, "rb") as f:
+        assert f.readable() is True
+        assert f.seekable() is True
 
-    def test_file_readable_writable_seekable(self, _fs: IRODSFileSystem):
-        """Test file capability methods."""
-        test_path = "/tempZone/file_caps_test.txt"
-        try:
-            _fs.pipe_file(test_path, b"test data")
-
-            with _fs.open(test_path, "rb") as f:
-                assert f.readable() is True
-                # Note: writable() and seekable() depend on mode
-                assert f.seekable() is True
-
-            with _fs.open(test_path, "wb") as f:
-                assert f.writable() is True
-                assert f.readable() is False
-                assert f.seekable() is True
-        finally:
-            if _fs.exists(test_path):
-                _fs.rm_file(test_path)
+    with _fs.open(test_path, "wb") as f:
+        assert f.writable() is True
+        assert f.readable() is False
+        assert f.seekable() is True
