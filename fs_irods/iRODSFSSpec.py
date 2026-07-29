@@ -637,7 +637,13 @@ class IRODSFileSystem(AbstractFileSystem):
         path = self.wrap(path)
         return IRODSFile(self, path, mode=mode, **kwargs)
 
-    def cat_file(self, path: str, start: Optional[int] = None, end: Optional[int] = None, **kwargs: Any) -> bytes:
+    def cat_file(
+        self,
+        path: str,
+        start: Optional[int] = None,
+        end: Optional[int] = None,
+        **kwargs: Any,
+    ) -> bytes:
         """Read entire contents of a file.
 
         Args:
@@ -652,7 +658,9 @@ class IRODSFileSystem(AbstractFileSystem):
         path = self.wrap(path)
 
         with self._lock:
-            with self._session.data_objects.open(path, "r", allow_redirect=False, auto_close=False) as f:
+            with self._session.data_objects.open(
+                path, "r", allow_redirect=False, auto_close=False
+            ) as f:
                 if start is not None:
                     f.seek(start)
                 if end is not None:
@@ -670,10 +678,17 @@ class IRODSFileSystem(AbstractFileSystem):
         path = self.wrap(path)
 
         with self._lock:
-            with self._session.data_objects.open(path, "w", allow_redirect=False, auto_close=False) as f:
+            with self._session.data_objects.open(
+                path, "w", allow_redirect=False, auto_close=False
+            ) as f:
                 f.write(value)
 
-    def ls(self, path: str, detail: bool = True, **kwargs: Any) -> Union[List[str], List[Dict[str, Any]]]:
+    def ls(
+        self,
+        path: str,
+        detail: bool = True,
+        **kwargs: Any,
+    ) -> Union[List[str], List[Dict[str, Any]]]:
         """List contents of a directory.
 
         Args:
@@ -762,11 +777,10 @@ class IRODSFileSystem(AbstractFileSystem):
             if self._session.data_objects.exists(path):
                 data_obj = self._session.data_objects.get(path)
                 return self._data_object_info(data_obj)
-            elif self._session.collections.exists(path):
+            if self._session.collections.exists(path):
                 collection = self._session.collections.get(path)
                 return self._collection_info(collection)
-            else:
-                raise FileNotFoundError(f"No such data object or collection: {path}")
+            raise FileNotFoundError(f"No such data object or collection: {path}")
 
     def exists(self, path: str, **kwargs: Any) -> bool:
         """Check if a path exists.
