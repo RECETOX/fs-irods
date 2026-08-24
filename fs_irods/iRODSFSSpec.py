@@ -46,7 +46,7 @@ def finalize():
         try:
             fs._finalize_files()
         except Exception:
-            pass  # Ignore errors during finalization
+            pass
 
 
 # Register finalization before iRODS client cleanup
@@ -65,8 +65,6 @@ class AbstractBufferedFile:
     This is a placeholder base class that provides documentation
     for the expected interface. Actual implementations inherit from this.
     """
-
-    pass
 
 
 class IRODSFile(AbstractBufferedFile):
@@ -101,10 +99,8 @@ class IRODSFile(AbstractBufferedFile):
         self._file = None
         self._closed = False
 
-        # Open the file handle
         self._open_file()
 
-        # Register this file with the filesystem for cleanup
         fs.files[self] = fs
 
     def _open_file(self):
@@ -202,7 +198,6 @@ class IRODSFile(AbstractBufferedFile):
                 self._file.close()
         finally:
             self._closed = True
-            # Remove from filesystem's file registry
             if self in self.fs.files:
                 del self.fs.files[self]
 
@@ -292,18 +287,14 @@ class IRODSFileSystem(AbstractFileSystem):
             *args: Additional positional arguments passed to parent.
             **kwargs: Additional keyword arguments passed to parent.
         """
-        # Initialize lock for thread safety
         self._lock = RLock()
         self._finalizing = False
 
-        # Store file handles for cleanup
         self.files = WeakKeyDictionary()
 
-        # Determine port
         if port is None:
             port = _get_default_port()
 
-        # Create or reuse session
         if session is None:
             if user is None or zone is None or password is None or host is None:
                 raise ValueError(
@@ -322,11 +313,7 @@ class IRODSFileSystem(AbstractFileSystem):
             self._session = session
             self._owns_session = False
 
-        # Set root path
-        self._root = root if root is not None else f"/{zone}"
-
-        # Register this instance for cleanup
-        fs_instances[self] = None
+        self._root = root if root is not None else f"/{self._session.zone}"
 
         super().__init__(*args, **kwargs)
 
@@ -354,7 +341,7 @@ class IRODSFileSystem(AbstractFileSystem):
             if self._owns_session:
                 self._session.cleanup()
         except Exception:
-            pass  # Ignore errors during finalization
+            pass
 
     def _finalize_files(self):
         """Close all open file handles."""
@@ -366,7 +353,7 @@ class IRODSFileSystem(AbstractFileSystem):
                 if not f.closed:
                     f.close()
             except Exception:
-                pass  # Ignore errors during finalization
+                pass
 
     @staticmethod
     def _get_kwargs_from_urls(path: str) -> Dict[str, Any]:
@@ -380,7 +367,6 @@ class IRODSFileSystem(AbstractFileSystem):
         """
         result = urlparse(path)
 
-        # Parse user and zone from username part
         if result.username is not None:
             try:
                 user, zone = result.username.split("+")
@@ -412,14 +398,11 @@ class IRODSFileSystem(AbstractFileSystem):
         parsed = urlparse(path)
         path = parsed.path or cls.root_marker
 
-        # Normalize path separators
         path = path.replace("\\", "/")
 
-        # Ensure path starts with root marker
         if not path.startswith(cls.root_marker):
             path = cls.root_marker + path
 
-        # Normalize multiple slashes
         while "//" in path:
             path = path.replace("//", "/")
 
@@ -435,6 +418,8 @@ class IRODSFileSystem(AbstractFileSystem):
             Full iRODS path.
         """
         path = self._strip_protocol(path)
+        if path.startswith(self._root):
+            return str(iRODSPath(path))
         return str(iRODSPath(self._root, path))
 
     def invalidate_cache(self, path: Optional[str] = None):
@@ -445,7 +430,6 @@ class IRODSFileSystem(AbstractFileSystem):
         """
         # fsspec has its own cache mechanism via invalidate_cache
         # This is a no-op for now as we don't maintain additional caching
-        pass
 
     def mkdir(
         self, path: str, create_parents: bool = True, **kwargs: Any
@@ -455,19 +439,37 @@ class IRODSFileSystem(AbstractFileSystem):
         Args:
             path: Path to the collection to create.
             create_parents: If True, create parent collections as needed.
+                If False, raises when the path already exists or the
+                parent collection does not exist.
             **kwargs: Additional keyword arguments.
+
+        Raises:
+            FileExistsError: If the collection already exists and
+                ``create_parents`` is False.
+            FileNotFoundError: If a parent collection does not exist and
+                ``create_parents`` is False.
         """
         path = self.wrap(path)
 
         with self._lock:
-            if self.session.collections.exists(path):
-                _logger.debug("Collection %s already exists", path)
+            if self._session.collections.exists(path):
+                if not create_parents:
+                    raise FileExistsError(
+                        f"Collection already exists: {path}"
+                    )
                 return
 
-            _logger.debug("Creating collection %s", path)
-            self.session.collections.create(path, recurse=create_parents)
+            if not create_parents:
+                parent_path = self._parent(path)
+                if parent_path and not self._session.collections.exists(
+                    self.wrap(parent_path)
+                ):
+                    raise FileNotFoundError(
+                        f"Parent collection does not exist: {parent_path}"
+                    )
 
-        # Invalidate parent cache
+            self._session.collections.create(path, recurse=create_parents)
+
         self.invalidate_cache(self._parent(path))
 
     def makedirs(self, path: str, exist_ok: bool = False) -> None:
@@ -479,13 +481,12 @@ class IRODSFileSystem(AbstractFileSystem):
         """
         path = self.wrap(path)
 
-        # Check if a file exists at this path
-        if self.session.data_objects.exists(path):
+        if self._session.data_objects.exists(path):
             raise FileExistsError(
                 f"A data object exists at path {path}, cannot create a directory there"
             )
 
-        coll_exists = self.session.collections.exists(path)
+        coll_exists = self._session.collections.exists(path)
         if not coll_exists:
             self.mkdir(path, create_parents=True)
         elif not exist_ok:
@@ -497,11 +498,16 @@ class IRODSFileSystem(AbstractFileSystem):
         Args:
             path: Path to the collection to remove.
             recursive: If True, remove contents recursively.
+
+        Raises:
+            FileNotFoundError: If the path does not exist.
         """
         path = self.wrap(path)
 
         with self._lock:
-            self.session.collections.remove(path, recurse=recursive)
+            if not self._session.collections.exists(path):
+                raise FileNotFoundError(f"No such collection: {path}")
+            self._session.collections.remove(path, recurse=recursive)
 
         self.invalidate_cache(self._parent(path))
 
@@ -510,11 +516,16 @@ class IRODSFileSystem(AbstractFileSystem):
 
         Args:
             path: Path to the data object to remove.
+
+        Raises:
+            FileNotFoundError: If the path does not exist.
         """
         path = self.wrap(path)
 
         with self._lock:
-            self.session.data_objects.unlink(path)
+            if not self._session.data_objects.exists(path):
+                raise FileNotFoundError(f"No such file: {path}")
+            self._session.data_objects.unlink(path)
 
         self.invalidate_cache(self._parent(path))
 
@@ -536,10 +547,10 @@ class IRODSFileSystem(AbstractFileSystem):
         path = self.wrap(path)
 
         with self._lock:
-            if self.session.data_objects.exists(path):
-                self.session.data_objects.unlink(path)
-            elif self.session.collections.exists(path):
-                self.session.collections.remove(path, recurse=recursive)
+            if self._session.data_objects.exists(path):
+                self._session.data_objects.unlink(path)
+            elif self._session.collections.exists(path):
+                self._session.collections.remove(path, recurse=recursive)
             else:
                 raise FileNotFoundError(f"No such data object or collection: {path}")
 
@@ -558,18 +569,18 @@ class IRODSFileSystem(AbstractFileSystem):
         Args:
             path1: Source path.
             path2: Destination path.
-            recursive: If True, move directory contents recursively.
-            maxdepth: Maximum depth to traverse when moving recursively.
+            recursive: If True, move directory contents recursively (ignored).
+            maxdepth: Maximum depth to traverse when moving recursively (ignored).
             **kwargs: Additional keyword arguments.
         """
         src_path = self.wrap(path1)
         dst_path = self.wrap(path2)
 
         with self._lock:
-            if self.session.data_objects.exists(src_path):
-                self.session.data_objects.move(src_path, dst_path)
-            elif self.session.collections.exists(src_path):
-                self.session.collections.move(src_path, dst_path)
+            if self._session.data_objects.exists(src_path):
+                self._session.data_objects.move(src_path, dst_path)
+            elif self._session.collections.exists(src_path):
+                self._session.collections.move(src_path, dst_path)
             else:
                 raise FileNotFoundError(f"No such data object or collection: {src_path}")
 
@@ -588,11 +599,11 @@ class IRODSFileSystem(AbstractFileSystem):
         dst_path = self.wrap(path2)
 
         with self._lock:
-            if self.session.data_objects.exists(src_path):
-                self.session.data_objects.copy(src_path, dst_path)
-            elif self.session.collections.exists(src_path):
+            if self._session.data_objects.exists(src_path):
+                self._session.data_objects.copy(src_path, dst_path)
+            elif self._session.collections.exists(src_path):
                 # For collections, just create the destination
-                self.session.collections.create(dst_path, recurse=True)
+                self._session.collections.create(dst_path, recurse=True)
             else:
                 raise FileNotFoundError(f"No such data object or collection: {src_path}")
 
@@ -621,10 +632,18 @@ class IRODSFileSystem(AbstractFileSystem):
         if not autocommit:
             raise NotImplementedError("Only autocommit=True operations are supported")
 
+        fs_instances[self] = None
+
         path = self.wrap(path)
         return IRODSFile(self, path, mode=mode, **kwargs)
 
-    def cat_file(self, path: str, start: Optional[int] = None, end: Optional[int] = None, **kwargs: Any) -> bytes:
+    def cat_file(
+        self,
+        path: str,
+        start: Optional[int] = None,
+        end: Optional[int] = None,
+        **kwargs: Any,
+    ) -> bytes:
         """Read entire contents of a file.
 
         Args:
@@ -639,7 +658,9 @@ class IRODSFileSystem(AbstractFileSystem):
         path = self.wrap(path)
 
         with self._lock:
-            with self.session.data_objects.open(path, "r", allow_redirect=False, auto_close=False) as f:
+            with self._session.data_objects.open(
+                path, "r", allow_redirect=False, auto_close=False
+            ) as f:
                 if start is not None:
                     f.seek(start)
                 if end is not None:
@@ -657,10 +678,17 @@ class IRODSFileSystem(AbstractFileSystem):
         path = self.wrap(path)
 
         with self._lock:
-            with self.session.data_objects.open(path, "w", allow_redirect=False, auto_close=False) as f:
+            with self._session.data_objects.open(
+                path, "w", allow_redirect=False, auto_close=False
+            ) as f:
                 f.write(value)
 
-    def ls(self, path: str, detail: bool = True, **kwargs: Any) -> Union[List[str], List[Dict[str, Any]]]:
+    def ls(
+        self,
+        path: str,
+        detail: bool = True,
+        **kwargs: Any,
+    ) -> Union[List[str], List[Dict[str, Any]]]:
         """List contents of a directory.
 
         Args:
@@ -676,16 +704,13 @@ class IRODSFileSystem(AbstractFileSystem):
         entries: List[Dict[str, Any]] = []
 
         with self._lock:
-            # Check if it's a data object first
-            if self.session.data_objects.exists(path):
-                data_obj = self.session.data_objects.get(path)
+            if self._session.data_objects.exists(path):
+                data_obj = self._session.data_objects.get(path)
                 entries.append(self._data_object_info(data_obj))
-            elif self.session.collections.exists(path):
-                collection = self.session.collections.get(path)
-                # Add subcollections
+            elif self._session.collections.exists(path):
+                collection = self._session.collections.get(path)
                 for subcoll in collection.subcollections:
                     entries.append(self._collection_info(subcoll))
-                # Add data objects
                 for data_obj in collection.data_objects:
                     entries.append(self._data_object_info(data_obj))
             else:
@@ -749,14 +774,13 @@ class IRODSFileSystem(AbstractFileSystem):
         path = self.wrap(path)
 
         with self._lock:
-            if self.session.data_objects.exists(path):
-                data_obj = self.session.data_objects.get(path)
+            if self._session.data_objects.exists(path):
+                data_obj = self._session.data_objects.get(path)
                 return self._data_object_info(data_obj)
-            elif self.session.collections.exists(path):
-                collection = self.session.collections.get(path)
+            if self._session.collections.exists(path):
+                collection = self._session.collections.get(path)
                 return self._collection_info(collection)
-            else:
-                raise FileNotFoundError(f"No such data object or collection: {path}")
+            raise FileNotFoundError(f"No such data object or collection: {path}")
 
     def exists(self, path: str, **kwargs: Any) -> bool:
         """Check if a path exists.
@@ -772,8 +796,8 @@ class IRODSFileSystem(AbstractFileSystem):
 
         with self._lock:
             return (
-                self.session.data_objects.exists(path)
-                or self.session.collections.exists(path)
+                self._session.data_objects.exists(path)
+                or self._session.collections.exists(path)
             )
 
     def isdir(self, path: str) -> bool:
@@ -788,7 +812,7 @@ class IRODSFileSystem(AbstractFileSystem):
         path = self.wrap(path)
 
         with self._lock:
-            return self.session.collections.exists(path)
+            return self._session.collections.exists(path)
 
     def isfile(self, path: str) -> bool:
         """Check if a path is a file.
@@ -802,7 +826,27 @@ class IRODSFileSystem(AbstractFileSystem):
         path = self.wrap(path)
 
         with self._lock:
-            return self.session.data_objects.exists(path)
+            return self._session.data_objects.exists(path)
+
+    def checksum(self, path: str) -> Optional[str]:
+        """Get the checksum of a file.
+
+        Args:
+            path: Path to the file.
+
+        Returns:
+            Checksum string (e.g., "sha256:abc123...") or None if not available.
+
+        Raises:
+            FileNotFoundError: If the path does not exist or is not a file.
+        """
+        path = self.wrap(path)
+
+        with self._lock:
+            if not self._session.data_objects.exists(path):
+                raise FileNotFoundError(f"No such file: {path}")
+            data_obj = self._session.data_objects.get(path)
+            return data_obj.checksum
 
     def size(self, path: str) -> int:
         """Get the size of a file.
@@ -812,13 +856,18 @@ class IRODSFileSystem(AbstractFileSystem):
 
         Returns:
             Size in bytes.
+
+        Raises:
+            FileNotFoundError: If the path does not exist or is not a file.
         """
         path = self.wrap(path)
 
         with self._lock:
-            if self.session.data_objects.exists(path):
-                return self.session.data_objects.get(path).size
-            raise FileNotFoundError(f"Not a file: {path}")
+            if not self.exists(path):
+                raise FileNotFoundError(f"No such file: {path}")
+            if not self._session.data_objects.exists(path):
+                raise FileNotFoundError(f"Not a file: {path}")
+            return self._session.data_objects.get(path).size
 
     def touch(self, path: str, truncate: bool = True, **kwargs: Any) -> None:
         """Create an empty file or update timestamp.
@@ -827,24 +876,37 @@ class IRODSFileSystem(AbstractFileSystem):
             path: Path to the file.
             truncate: If True, set file size to 0.
             **kwargs: Additional keyword arguments.
+
+        Raises:
+            IsADirectoryError: If the path points to an existing collection.
+            FileNotFoundError: If the parent collection does not exist.
+            FileExistsError: If the file already exists and truncate is False.
         """
         path = self.wrap(path)
 
         with self._lock:
-            if not self.session.data_objects.exists(path):
-                _logger.debug("Creating empty data object %s", path)
-                self.session.data_objects.create(path)
+            if self._session.collections.exists(path):
+                raise IsADirectoryError(f"Path is a collection, not a data object: {path}")
+
+            if not self._session.data_objects.exists(path):
+                parent_path = self._parent(path)
+                if parent_path and not self._session.collections.exists(
+                    self.wrap(parent_path)
+                ):
+                    raise FileNotFoundError(
+                        f"Parent collection does not exist: {parent_path}"
+                    )
+
+                self._session.data_objects.create(path)
                 self.invalidate_cache(self._parent(path))
                 return
 
-            if self.session.collections.exists(path):
-                raise IsADirectoryError(f"Path is a collection, not a data object: {path}")
-
             if truncate:
-                _logger.debug("Truncating data object %s", path)
-                self.session.data_objects.truncate(path, size=0)
+                self._session.data_objects.truncate(path, size=0)
+                self._session.data_objects.touch(path, **kwargs)
+            else:
+                raise FileExistsError(f"Data object already exists: {path}")
 
-            self.session.data_objects.touch(path, **kwargs)
 
     def modified(self, path: str) -> datetime.datetime:
         """Return the modification timestamp of a file.
@@ -883,7 +945,7 @@ class IRODSFileSystem(AbstractFileSystem):
         Returns:
             Unique ID based on host and port.
         """
-        return "irods_" + tokenize(self.session.host, self.session.port)
+        return "irods_" + tokenize(self._session.host, self._session.port)
 
     def du(
         self,
@@ -934,6 +996,7 @@ class IRODSFileSystem(AbstractFileSystem):
         self,
         path: str,
         maxdepth: Optional[int] = None,
+        topdown: bool = True,
         on_error: Any = "omit",
         **kwargs: Any,
     ):
@@ -942,6 +1005,7 @@ class IRODSFileSystem(AbstractFileSystem):
         Args:
             path: Path to start walking from.
             maxdepth: Maximum depth to traverse.
+            topdown: Direction of traversal.
             on_error: Error handling strategy.
             **kwargs: Additional keyword arguments.
 
@@ -949,7 +1013,8 @@ class IRODSFileSystem(AbstractFileSystem):
             Tuples of (path, dirs, files) for each directory.
         """
         path = self.wrap(path)
-        yield from super().walk(path, maxdepth=maxdepth, on_error=on_error, **kwargs)
+        yield from super().walk(
+            path, maxdepth=maxdepth, topdown=topdown, on_error=on_error, **kwargs)
 
     @property
     def session(self) -> iRODSSession:
@@ -983,6 +1048,15 @@ class IRODSFileSystem(AbstractFileSystem):
             self._session.cleanup()
         if self in fs_instances:
             del fs_instances[self]
+
+    def __enter__(self):
+        """Enter context manager."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit context manager and close the filesystem."""
+        self.close()
+        return False
 
     def __str__(self) -> str:
         """String representation of the filesystem."""

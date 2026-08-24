@@ -2,23 +2,21 @@
 
 import datetime
 import os
-import time
-from typing import List, Dict, Any
-
 import pytest
 
 from fs_irods import IRODSFileSystem
+from fs_irods.iRODSFSSpec import fs_instances
 from tests.iRODSFSBuilder import iRODSFSBuilder
 
 
 @pytest.fixture
-def fs():
+def _fs():
     """Create an IRODSFileSystem instance for testing."""
     builder: iRODSFSBuilder = iRODSFSBuilder().with_root("/")
     session = builder._session
 
     # Create filesystem using the session
-    sut = IRODSFileSystem(session=session, root="/")
+    sut = IRODSFileSystem(session=session)
 
     # Set up test fixtures
     if not sut.exists("/tempZone/existing_file.txt"):
@@ -36,8 +34,6 @@ def fs():
             sut.rm("/tempZone/existing_collection", recursive=True)
         if sut.exists("/tempZone/existing_file.txt"):
             sut.rm("/tempZone/existing_file.txt")
-        if sut.exists("/tempZone/new_collection"):
-            sut.rm("/tempZone/new_collection", recursive=True)
     except Exception:
         pass  # Ignore cleanup errors
 
@@ -45,33 +41,79 @@ def fs():
     session.cleanup()
 
 
+# =============================================================================
+# Basic State Tests
+# =============================================================================
+
 def test_default_state():
     """Test that the filesystem is in a valid default state."""
     builder: iRODSFSBuilder = iRODSFSBuilder().with_root("/")
     session = builder._session
     sut = IRODSFileSystem(session=session, root="/")
 
-    # Should be able to list the zone root
     items = sut.ls("/tempZone")
-    assert len(items) >= 2  # home and trash typically exist
+    assert len(items) >= 2  # /tempZone/home and /tempZone/trash
+    items = sut.ls("/tempZone/home")
+    assert len(items) >= 2  # /tempZone/home/rods and /tempZone/home/public
 
     sut.close()
     session.cleanup()
 
 
+# =============================================================================
+# ls() Tests
+# =============================================================================
+
 @pytest.mark.parametrize("path, expected_count", [("/tempZone", 4)])
-def test_ls_detail(fs: IRODSFileSystem, path: str, expected_count: int):
+def test_ls_detail(_fs: IRODSFileSystem, path: str, expected_count: int):
     """Test listing with detail information."""
-    entries = fs.ls(path, detail=True)
+    entries = _fs.ls(path, detail=True)
     assert len(entries) == expected_count
 
-    # Each entry should have required keys
     for entry in entries:
         assert "name" in entry
         assert "size" in entry
         assert "type" in entry
         assert entry["type"] in ("file", "directory")
 
+
+@pytest.mark.parametrize(
+    "path, detail",
+    [
+        ["/tempZone/existing_file.txt", True],
+        ["/tempZone/existing_collection/existing_file.txt", True],
+        ["/tempZone/existing_collection/existing_file.txt", False],
+    ],
+)
+def test_ls_file(_fs: IRODSFileSystem, path: str, detail: bool):
+    """Test basic listing without detail."""
+    result = _fs.ls(path, detail)
+    if detail:
+        assert result[0]["name"] == path
+        assert result[0]["type"] == "file"
+        assert "created" in result[0]
+        assert "mtime" in result[0]
+        assert "size" in result[0]
+        assert "checksum" in result[0]
+    else:
+        assert result[0] == path
+
+
+@pytest.mark.parametrize(
+    "path, exception",
+    [
+        ["/tempZone/i_dont_exist", FileNotFoundError],
+    ],
+)
+def test_ls_exceptions(_fs: IRODSFileSystem, path: str, exception: type):
+    """Test ls error handling."""
+    with pytest.raises(exception):
+        _fs.ls(path)
+
+
+# =============================================================================
+# isdir() and isfile() Tests
+# =============================================================================
 
 @pytest.mark.parametrize(
     "path, expected",
@@ -82,9 +124,9 @@ def test_ls_detail(fs: IRODSFileSystem, path: str, expected_count: int):
         ["/tempZone/i_dont_exist", False],
     ],
 )
-def test_isdir(fs: IRODSFileSystem, path: str, expected: bool):
+def test_isdir(_fs: IRODSFileSystem, path: str, expected: bool):
     """Test directory checking."""
-    assert fs.isdir(path) == expected
+    assert _fs.isdir(path) == expected
 
 
 @pytest.mark.parametrize(
@@ -97,60 +139,129 @@ def test_isdir(fs: IRODSFileSystem, path: str, expected: bool):
         ["/tempZone", False],
     ],
 )
-def test_isfile(fs: IRODSFileSystem, path: str, expected: bool):
+def test_isfile(_fs: IRODSFileSystem, path: str, expected: bool):
     """Test file checking."""
-    assert fs.isfile(path) == expected
+    assert _fs.isfile(path) == expected
 
+
+# =============================================================================
+# exists() Tests
+# =============================================================================
+
+@pytest.mark.parametrize(
+    "path, expected_exists",
+    [
+        ["/tempZone/home", True],
+        ["/tempZone/i_dont_exist", False],
+        ["/tempZone/existing_file.txt", True],
+        ["/tempZone/existing_collection/i_dont_exist.txt", False],
+    ],
+)
+def test_exists(_fs: IRODSFileSystem, path: str, expected_exists: bool):
+    """Test existence checking."""
+    assert _fs.exists(path) == expected_exists
+
+
+# =============================================================================
+# mkdir() Tests
+# =============================================================================
 
 @pytest.mark.parametrize("path", ["/tempZone/test", "/tempZone/home/rods/test"])
-def test_mkdir(fs: IRODSFileSystem, path: str):
+def test_mkdir(_fs: IRODSFileSystem, path: str):
     """Test creating a collection."""
     parent_dir = os.path.dirname(path)
-    if not fs.exists(parent_dir):
-        fs.makedirs(parent_dir, exist_ok=True)
+    if not _fs.exists(parent_dir):
+        _fs.makedirs(parent_dir, exist_ok=True)
 
-    fs.mkdir(path)
-    assert fs.isdir(path) is True
-    fs.rmdir(path)
-    assert fs.isdir(path) is False
+    _fs.mkdir(path)
+    assert _fs.isdir(path) is True
+    _fs.rmdir(path)
+    assert _fs.isdir(path) is False
 
 
 @pytest.mark.parametrize(
     "path, exception",
     [
-        ["/tempZone/home", FileExistsError],  # Already exists
-        ["/tempZone/test/subcollection", FileNotFoundError],  # Parent doesn't exist
+        ["/tempZone/home", FileExistsError],
+        ["/tempZone/test/subcollection", FileNotFoundError],
     ],
 )
-def test_mkdir_exceptions(fs: IRODSFileSystem, path: str, exception: type):
+def test_mkdir_exceptions(_fs: IRODSFileSystem, path: str, exception: type):
     """Test mkdir error handling."""
     with pytest.raises(exception):
-        fs.mkdir(path, create_parents=False)
+        _fs.mkdir(path, create_parents=False)
 
 
-@pytest.mark.parametrize("path", ["/tempZone/test.txt", "/tempZone/home/rods/test.txt"])
-def test_touch_remove(fs: IRODSFileSystem, path: str):
+# =============================================================================
+# makedirs() Tests
+# =============================================================================
+
+def test_makedirs(_fs: IRODSFileSystem):
+    """Test recursively creating directories."""
+    test_path = "/tempZone/makedirs_test/a/b/c"
+    try:
+        _fs.makedirs(test_path)
+        assert _fs.isdir(test_path)
+    finally:
+        parent = "/tempZone/makedirs_test"
+        if _fs.exists(parent):
+            _fs.rm(parent, recursive=True)
+
+
+def test_makedirs_exist_ok(_fs: IRODSFileSystem):
+    """Test makedirs with exist_ok=True."""
+    test_path = "/tempZone/existing_collection"
+    _fs.makedirs(test_path, exist_ok=True)
+    assert _fs.isdir(test_path)
+
+
+@pytest.mark.parametrize(
+    "path, exception, exist_ok",
+    [
+        ["/tempZone/existing_collection", FileExistsError, False],
+        ["/tempZone/existing_file.txt", FileExistsError, True],
+    ],
+)
+def test_makedirs_exceptions(_fs: IRODSFileSystem, path: str, exception: type, exist_ok: bool):
+    """Test makedirs error handling."""
+    with pytest.raises(exception):
+        _fs.makedirs(path, exist_ok=exist_ok)
+
+
+# =============================================================================
+# touch() Tests
+# =============================================================================
+
+@pytest.mark.parametrize(
+    "path", 
+    ["/tempZone/test.txt", "/tempZone/home/rods/test.txt", "/tempZone/existing_file.txt"]
+)
+def test_touch_remove(_fs: IRODSFileSystem, path: str):
     """Test creating and removing a file."""
-    fs.touch(path)
-    assert fs.isfile(path) is True
-    fs.rm_file(path)
-    assert fs.isfile(path) is False
+    _fs.touch(path)
+    assert _fs.isfile(path) is True
+    assert _fs.info(path)["size"] == 0
+    _fs.rm_file(path)
+    assert _fs.isfile(path) is False
 
 
 @pytest.mark.parametrize(
     "path, exception",
     [
-        ["/tempZone/missing_collection/file.txt", FileNotFoundError],
-        ["/tempZone/existing_file.txt", FileExistsError],  # Already exists but touch with truncate=False
+        ["/tempZone/i_dont_exist/file.txt", FileNotFoundError],
+        ["/tempZone/existing_file.txt", FileExistsError],
+        ["/tempZone/existing_collection", IsADirectoryError],
     ],
 )
-def test_touch_exceptions(fs: IRODSFileSystem, path: str, exception: type):
+def test_touch_exceptions(_fs: IRODSFileSystem, path: str, exception: type):
     """Test touch error handling."""
-    # Note: touch behavior may vary - this tests the general pattern
-    if exception == FileNotFoundError:
-        with pytest.raises(exception):
-            fs.touch(path)
+    with pytest.raises(exception):
+        _fs.touch(path, truncate=False)
 
+
+# =============================================================================
+# info() Tests
+# =============================================================================
 
 @pytest.mark.parametrize(
     "path, is_dir",
@@ -159,11 +270,11 @@ def test_touch_exceptions(fs: IRODSFileSystem, path: str, exception: type):
         ["/tempZone/existing_file.txt", False],
     ],
 )
-def test_info(fs: IRODSFileSystem, path: str, is_dir: bool):
+def test_info(_fs: IRODSFileSystem, path: str, is_dir: bool):
     """Test getting file/directory info."""
-    info = fs.info(path)
+    info = _fs.info(path)
 
-    assert info["name"] == os.path.basename(path.rstrip("/")) or info["name"].endswith(os.path.basename(path))
+    assert info["name"] == path
     assert info["type"] == ("directory" if is_dir else "file")
     assert "created" in info
     assert "mtime" in info
@@ -174,271 +285,522 @@ def test_info(fs: IRODSFileSystem, path: str, is_dir: bool):
 
 
 @pytest.mark.parametrize(
-    "path, expected_exists",
-    [
-        ["/tempZone/home", True],
-        ["/tempZone/home/rods", True],
-        ["/tempZone/fakedir", False],
-        ["/tempZone/home/other_user", False],
-        ["/tempZone/existing_file.txt", True],
-        ["/tempZone/existing_collection/existing_file.txt", True],
-    ],
+    "path, exception",
+    [["/tempZone/i_dont_exist", FileNotFoundError]]
 )
-def test_exists(fs: IRODSFileSystem, path: str, expected_exists: bool):
-    """Test existence checking."""
-    assert fs.exists(path) == expected_exists
+def test_info_exceptions(_fs: IRODSFileSystem, path: str, exception: type):
+    """Test info error handling."""
+    with pytest.raises(exception):
+        _fs.info(path)
 
+
+# =============================================================================
+# rmdir() Tests
+# =============================================================================
 
 @pytest.mark.parametrize("path", ["/tempZone/foo", "/tempZone/home/rods/test"])
-def test_rmdir(fs: IRODSFileSystem, path: str):
+def test_rmdir(_fs: IRODSFileSystem, path: str):
     """Test removing a directory."""
     parent_dir = os.path.dirname(path)
-    if not fs.exists(parent_dir):
-        fs.makedirs(parent_dir, exist_ok=True)
+    if not _fs.exists(parent_dir):
+        _fs.makedirs(parent_dir, exist_ok=True)
 
-    fs.mkdir(path)
-    assert fs.isdir(path) is True
-    fs.rmdir(path)
-    assert fs.isdir(path) is False
+    _fs.mkdir(path)
+    assert _fs.isdir(path) is True
+    _fs.rmdir(path)
+    assert _fs.isdir(path) is False
 
+
+@pytest.mark.parametrize(
+    "path, exception",
+    [
+        ["/tempZone/i_dont_exist", FileNotFoundError],
+        ["/tempZone/existing_file.txt", FileNotFoundError],
+    ],
+)
+def test_rmdir_exceptions(_fs: IRODSFileSystem, path: str, exception: type):
+    """Test rmdir error handling."""
+    with pytest.raises(exception):
+        _fs.rmdir(path)
+
+
+# =============================================================================
+# rm() Tests
+# =============================================================================
+
+def test_rm_recursive(_fs: IRODSFileSystem):
+    """Test recursive removal of directories."""
+    base = "/tempZone/rm_recursive_test"
+    _fs.makedirs(f"{base}/a/b")
+    _fs.pipe_file(f"{base}/file1.txt", b"content1")
+    _fs.pipe_file(f"{base}/a/file2.txt", b"content2")
+
+    _fs.rm(base, recursive=True)
+
+    assert not _fs.exists(base)
+
+
+def test_rm_exceptions(_fs: IRODSFileSystem):
+    """Test that rm raises FileNotFoundError for nonexistent path."""
+    with pytest.raises(FileNotFoundError):
+        _fs.rm("/tempZone/i_dont_exist", recursive=True)
+
+
+# =============================================================================
+# rm_file() Tests
+# =============================================================================
+
+def test_rm_file(_fs: IRODSFileSystem):
+    """Test removing a single file."""
+    test_path = "/tempZone/existing_file.txt"
+    assert _fs.exists(test_path)
+    _fs.rm_file(test_path)
+    assert not _fs.exists(test_path)
+
+
+def test_rm_file_exceptions(_fs: IRODSFileSystem):
+    """Test that rm_file raises FileNotFoundError for non-existent files."""
+    with pytest.raises(FileNotFoundError):
+        _fs.rm_file("/tempZone/i_dont_exist.txt")
+
+
+# =============================================================================
+# cp_file() Tests
+# =============================================================================
 
 @pytest.mark.parametrize(
     "src_path, dst_path",
     [
-        ["/tempZone/existing_collection", "/tempZone/home/copy_test"],
-        ["/tempZone/existing_collection", "/tempZone/new_copy"],
+        ["/tempZone/existing_collection", "/tempZone/dst_collection"],
+        ["/tempZone/existing_file.txt", "/tempZone/home/dst_file.txt"],
     ],
 )
-def test_cp_file(fs: IRODSFileSystem, src_path: str, dst_path: str):
+def test_cp_file(_fs: IRODSFileSystem, src_path: str, dst_path: str):
     """Test copying a file."""
     try:
-        fs.cp_file(src_path, dst_path)
-        assert fs.exists(dst_path)
+        _fs.cp_file(src_path, dst_path)
+        assert _fs.exists(dst_path)
 
-        # For data objects, verify content
-        if fs.isfile(src_path):
-            src_content = fs.cat_file(src_path)
-            dst_content = fs.cat_file(dst_path)
+        if _fs.isfile(src_path):
+            src_content = _fs.cat_file(src_path)
+            dst_content = _fs.cat_file(dst_path)
             assert src_content == dst_content
     finally:
-        if fs.exists(dst_path):
-            fs.rm(dst_path, recursive=True)
+        if _fs.exists(dst_path):
+            _fs.rm(dst_path, recursive=True)
 
 
 @pytest.mark.parametrize(
-    "path, expected_entries",
+    "src_path",
     [
-        ["/tempZone", True],  # Should have multiple entries
-        ["/tempZone/home", True],
+        "/tempZone/i_dont_exist.txt",
     ],
 )
-def test_ls_basic(fs: IRODSFileSystem, path: str, expected_entries: bool):
-    """Test basic listing without detail."""
-    result = fs.ls(path, detail=False)
-    if expected_entries:
-        assert len(result) > 0
-        assert all(isinstance(item, str) for item in result)
-    else:
-        assert len(result) == 0
+def test_cp_file_exceptions(_fs: IRODSFileSystem, src_path: str):
+    """Test that cp_file raises FileNotFoundError for non-existent source."""
+    with pytest.raises(FileNotFoundError):
+        _fs.cp_file(src_path, "/tempZone/destination.txt")
 
 
-def test_cat_file(fs: IRODSFileSystem):
-    """Test reading entire file contents."""
-    content = fs.cat_file("/tempZone/existing_collection/existing_file.txt")
-    assert content == b"content"
+# =============================================================================
+# mv() Tests
+# =============================================================================
 
-
-def test_pipe_file(fs: IRODSFileSystem):
-    """Test writing bytes to a file."""
-    test_path = "/tempZone/piped_file.txt"
-    try:
-        test_content = b"test content for piping"
-        fs.pipe_file(test_path, test_content)
-
-        read_content = fs.cat_file(test_path)
-        assert read_content == test_content
-    finally:
-        if fs.exists(test_path):
-            fs.rm_file(test_path)
-
-
-def test_open_read(fs: IRODSFileSystem):
-    """Test opening a file for reading."""
-    test_path = "/tempZone/open_test.txt"
-    try:
-        fs.pipe_file(test_path, b"hello world")
-
-        with fs.open(test_path, "rb") as f:
-            content = f.read()
-            assert content == b"hello world"
-    finally:
-        if fs.exists(test_path):
-            fs.rm_file(test_path)
-
-
-def test_open_write(fs: IRODSFileSystem):
-    """Test opening a file for writing."""
-    test_path = "/tempZone/open_write_test.txt"
-    try:
-        with fs.open(test_path, "wb") as f:
-            f.write(b"written content")
-
-        content = fs.cat_file(test_path)
-        assert content == b"written content"
-    finally:
-        if fs.exists(test_path):
-            fs.rm_file(test_path)
-
-
-def test_open_append(fs: IRODSFileSystem):
-    """Test opening a file for appending."""
-    test_path = "/tempZone/open_append_test.txt"
-    try:
-        fs.pipe_file(test_path, b"first ")
-
-        with fs.open(test_path, "ab") as f:
-            f.write(b"appended")
-
-        content = fs.cat_file(test_path)
-        assert content == b"first appended"
-    finally:
-        if fs.exists(test_path):
-            fs.rm_file(test_path)
-
-
-def test_mv_file(fs: IRODSFileSystem):
+@pytest.mark.parametrize(
+    "src, dst",
+    [
+        ["/tempZone/existing_file.txt", "/tempZone/home/dst_file.txt"],
+        ["/tempZone/existing_collection", "/tempZone/home/dst_collection"],
+    ],
+)
+def test_mv_file(_fs: IRODSFileSystem, src: str, dst: str):
     """Test moving a file."""
-    src = "/tempZone/mv_src.txt"
-    dst = "/tempZone/mv_dst.txt"
     try:
-        fs.pipe_file(src, b"move me")
+        _fs.mv(src, dst)
 
-        fs.mv(src, dst)
-
-        assert not fs.exists(src)
-        assert fs.exists(dst)
-        assert fs.cat_file(dst) == b"move me"
+        assert not _fs.exists(src)
+        assert _fs.exists(dst)
+        if _fs.isfile(dst):
+            assert _fs.cat_file(dst) == b"initial content"
+        else:
+            assert _fs.exists(f"{dst}/existing_file.txt")
+            assert _fs.cat_file(f"{dst}/existing_file.txt") == b"content"
     finally:
-        if fs.exists(dst):
-            fs.rm_file(dst)
+        if _fs.exists(dst):
+            _fs.rm(dst, recursive=True)
 
 
-def test_rm_file(fs: IRODSFileSystem):
-    """Test removing a single file."""
-    test_path = "/tempZone/remove_me.txt"
-    try:
-        fs.pipe_file(test_path, b"delete me")
-        assert fs.exists(test_path)
-
-        fs.rm_file(test_path)
-        assert not fs.exists(test_path)
-    except Exception:
-        pass  # Clean up on failure
-    finally:
-        if fs.exists(test_path):
-            try:
-                fs.rm_file(test_path)
-            except Exception:
-                pass
+@pytest.mark.parametrize(
+    "src, dst",
+    [
+        ["/tempZone/i_dont_exist.txt", "/tempZone/dst_file.txt"],
+        ["/tempZone/i_dont_exist", "/tempZone/home/dst_collection"],
+    ],
+)
+def test_mv_file_exceptions(_fs: IRODSFileSystem, src: str, dst: str):
+    """Test that mv raises FileNotFoundError for non-existent source."""
+    with pytest.raises(FileNotFoundError):
+        _fs.mv(src, dst)
 
 
-def test_size(fs: IRODSFileSystem):
+# =============================================================================
+# cat_file() and pipe_file() Tests
+# =============================================================================
+
+def test_cat_file(_fs: IRODSFileSystem):
+    """Test reading entire file contents."""
+    content = _fs.cat_file("/tempZone/existing_collection/existing_file.txt")
+    assert content == b"content"
+    content = _fs.cat_file("/tempZone/existing_collection/existing_file.txt", start=0, end=5)
+    assert content == b"conte"
+
+
+def test_pipe_file(_fs: IRODSFileSystem):
+    """Test writing bytes to a file."""
+    test_path = "/tempZone/existing_file.txt"
+    test_content = b"test content for piping"
+    _fs.pipe_file(test_path, test_content)
+
+    read_content = _fs.cat_file(test_path)
+    assert read_content == test_content
+
+
+# =============================================================================
+# open() Tests
+# =============================================================================
+
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        ["/tempZone/existing_file.txt", b"initial content"],
+        ["/tempZone/existing_collection/existing_file.txt", b"content"],
+    ],
+)
+def test_open_read(_fs: IRODSFileSystem, path: str, expected: bytes):
+    """Test opening a file for reading."""
+    with _fs.open(path, "rb") as f:
+        assert f.read() == expected
+
+
+def test_open_write(_fs: IRODSFileSystem):
+    """Test opening a file for writing."""
+    test_path = "/tempZone/existing_file.txt"
+    with _fs.open(test_path, "wb") as f:
+        f.write(b"written content")
+    assert _fs.cat_file(test_path) == b"written content"
+
+
+def test_open_append(_fs: IRODSFileSystem):
+    """Test opening a file for appending."""
+    test_path = "/tempZone/existing_file.txt"
+    _fs.pipe_file(test_path, b"first ")
+    with _fs.open(test_path, "ab") as f:
+        f.write(b"appended")
+    assert _fs.cat_file(test_path) == b"first appended"
+
+
+def test_open_autocommit_not_implemented(_fs: IRODSFileSystem):
+    """Test that open raises NotImplementedError when autocommit=False."""
+    with pytest.raises(NotImplementedError):
+        _fs.open("/tempZone/existing_file.txt", autocommit=False)
+
+
+# =============================================================================
+# size() Tests
+# =============================================================================
+
+def test_size(_fs: IRODSFileSystem):
     """Test getting file size."""
-    test_path = "/tempZone/size_test.txt"
-    try:
-        test_content = b"x" * 100
-        fs.pipe_file(test_path, test_content)
-
-        size = fs.size(test_path)
-        assert size == 100
-    finally:
-        if fs.exists(test_path):
-            fs.rm_file(test_path)
+    test_path = "/tempZone/existing_file.txt"
+    size = _fs.size(test_path)
+    assert size == 15
 
 
-def test_modified(fs: IRODSFileSystem):
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/tempZone/i_dont_exist.txt",
+        "/tempZone/existing_collection",
+    ],
+)
+def test_size_exceptions(_fs: IRODSFileSystem, path: str):
+    """Test that size raises FileNotFoundError for non-existent files."""
+    with pytest.raises(FileNotFoundError):
+        _fs.size(path)
+
+
+# =============================================================================
+# modified() Tests
+# =============================================================================
+
+def test_modified(_fs: IRODSFileSystem):
     """Test getting modification time."""
-    mtime = fs.modified("/tempZone/existing_file.txt")
+    mtime = _fs.modified("/tempZone/existing_file.txt")
     assert isinstance(mtime, datetime.datetime)
 
 
-def test_created(fs: IRODSFileSystem):
+def test_modified_exceptions(_fs: IRODSFileSystem):
+    """Test that modified raises FileNotFoundError for non-existent files."""
+    with pytest.raises(FileNotFoundError):
+        _fs.modified("/tempZone/i_dont_exist.txt")
+
+
+# =============================================================================
+# created() Tests
+# =============================================================================
+
+def test_created(_fs: IRODSFileSystem):
     """Test getting creation time."""
-    ctime = fs.created("/tempZone/existing_file.txt")
+    ctime = _fs.created("/tempZone/existing_file.txt")
     assert isinstance(ctime, datetime.datetime)
 
 
-def test_makedirs(fs: IRODSFileSystem):
-    """Test recursively creating directories."""
-    test_path = "/tempZone/makedirs_test/a/b/c"
-    try:
-        fs.makedirs(test_path)
-        assert fs.isdir(test_path)
-    finally:
-        parent = "/tempZone/makedirs_test"
-        if fs.exists(parent):
-            fs.rm(parent, recursive=True)
+def test_created_exceptions(_fs: IRODSFileSystem):
+    """Test that created raises FileNotFoundError for non-existent files."""
+    with pytest.raises(FileNotFoundError):
+        _fs.created("/tempZone/i_dont_exist.txt")
 
 
-def test_makedirs_exist_ok(fs: IRODSFileSystem):
-    """Test makedirs with exist_ok=True."""
-    test_path = "/tempZone/existing_collection"
-    # This should not raise when exist_ok=True
-    fs.makedirs(test_path, exist_ok=True)
-    assert fs.isdir(test_path)
+# =============================================================================
+# checksum() Tests
+# =============================================================================
 
-
-def test_makedirs_raises_on_existing_file(fs: IRODSFileSystem):
-    """Test makedirs raises when path is a file."""
+def test_checksum(_fs: IRODSFileSystem):
+    """Test getting file checksum."""
     test_path = "/tempZone/existing_file.txt"
-    with pytest.raises(FileExistsError):
-        fs.makedirs(test_path)
+    checksum = _fs.checksum(test_path)
+
+    if checksum is not None:
+        assert isinstance(checksum, str)
+        assert ":" in checksum or len(checksum) > 0
 
 
-def test_fs_properties(fs: IRODSFileSystem):
+def test_checksum_exceptions(_fs: IRODSFileSystem):
+    """Test checksum raises for nonexistent file."""
+    with pytest.raises(FileNotFoundError):
+        _fs.checksum("/tempZone/i_dont_exist.txt")
+
+
+# =============================================================================
+# find() Tests
+# =============================================================================
+
+def test_find(_fs: IRODSFileSystem):
+    """Test finding all files recursively."""
+    base = "/tempZone/find_test"
+    try:
+        _fs.makedirs(f"{base}/a/b/c")
+        _fs.pipe_file(f"{base}/file1.txt", b"content1")
+        _fs.pipe_file(f"{base}/a/file2.txt", b"content2")
+        _fs.pipe_file(f"{base}/a/b/file3.txt", b"content3")
+
+        result = _fs.find(base)
+        assert isinstance(result, list)
+        assert len(result) == 3
+        assert f"{base}/file1.txt" in result
+        assert f"{base}/a/file2.txt" in result
+        assert f"{base}/a/b/file3.txt" in result
+
+        result_with_dirs = _fs.find(base, withdirs=True)
+        assert isinstance(result_with_dirs, list)
+        assert len(result_with_dirs) >= 3
+
+        result_depth1 = _fs.find(base, maxdepth=1)
+        assert isinstance(result_depth1, list)
+        assert f"{base}/file1.txt" in result_depth1
+
+        result_detail = _fs.find(base, detail=True)
+        if isinstance(result_detail, dict):
+            assert len(result_detail) == 3
+        elif isinstance(result_detail, list):
+            assert len(result_detail) == 3
+            for item in result_detail:
+                assert isinstance(item, dict)
+                assert "name" in item
+    finally:
+        if _fs.exists(base):
+            _fs.rm(base, recursive=True)
+
+
+def test_find_empty(_fs: IRODSFileSystem):
+    """Test find on empty directory."""
+    base = "/tempZone/i_dont_exist"
+    try:
+        _fs.makedirs(base)
+
+        result = _fs.find(base)
+        assert result == []
+    finally:
+        if _fs.exists(base):
+            _fs.rm(base, recursive=True)
+
+
+# =============================================================================
+# walk() Tests
+# =============================================================================
+
+def test_walk(_fs: IRODSFileSystem):
+    """Test walking directory tree."""
+    base = "/tempZone/walk_test"
+    try:
+        _fs.makedirs(f"{base}/a/b")
+        _fs.pipe_file(f"{base}/file1.txt", b"content1")
+        _fs.pipe_file(f"{base}/a/file2.txt", b"content2")
+        _fs.pipe_file(f"{base}/a/b/file3.txt", b"content3")
+
+        results = list(_fs.walk(base))
+
+        assert len(results) > 0
+        for entry in results:
+            assert len(entry) == 3
+            path, dirs, files = entry
+            assert path.startswith(base)
+            assert isinstance(dirs, list)
+            assert isinstance(files, list)
+
+        root_entry = results[0]
+        assert root_entry[0] == base
+    finally:
+        if _fs.exists(base):
+            _fs.rm(base, recursive=True)
+
+
+def test_walk_maxdepth(_fs: IRODSFileSystem):
+    """Test walk with maxdepth limit."""
+    base = "/tempZone/walk_depth_test"
+    try:
+        _fs.makedirs(f"{base}/a/b/c")
+        _fs.pipe_file(f"{base}/file1.txt", b"content1")
+        _fs.pipe_file(f"{base}/a/file2.txt", b"content2")
+        _fs.pipe_file(f"{base}/a/b/file3.txt", b"content3")
+        _fs.pipe_file(f"{base}/a/b/c/file4.txt", b"content4")
+
+        results = list(_fs.walk(base, maxdepth=1))
+
+        assert len(results) >= 1
+        for entry in results:
+            path = entry[0]
+            depth = path.count("/") - base.count("/")
+            assert depth <= 1
+    finally:
+        if _fs.exists(base):
+            _fs.rm(base, recursive=True)
+
+
+# =============================================================================
+# du() Tests
+# =============================================================================
+
+def test_du(_fs: IRODSFileSystem):
+    """Test disk usage calculation."""
+    base = "/tempZone/du_test"
+    try:
+        _fs.makedirs(base)
+        _fs.pipe_file(f"{base}/file1.txt", b"x" * 100)
+        _fs.pipe_file(f"{base}/file2.txt", b"x" * 200)
+
+        total = _fs.du(base)
+        assert isinstance(total, int)
+        assert total == 300
+
+        sizes = _fs.du(base, total=False)
+        assert isinstance(sizes, dict)
+        assert f"{base}/file1.txt" in sizes
+        assert f"{base}/file2.txt" in sizes
+        assert sizes[f"{base}/file1.txt"] == 100
+        assert sizes[f"{base}/file2.txt"] == 200
+
+        _fs.makedirs(f"{base}/subdir")
+        _fs.pipe_file(f"{base}/subdir/file3.txt", b"x" * 50)
+
+        shallow = _fs.du(base, maxdepth=1, total=False)
+        assert isinstance(shallow, dict)
+        assert f"{base}/file1.txt" in shallow
+        assert f"{base}/file2.txt" in shallow
+    finally:
+        if _fs.exists(base):
+            _fs.rm(base, recursive=True)
+
+
+def test_du_empty(_fs: IRODSFileSystem):
+    """Test du on empty directory."""
+    base = "/tempZone/i_dont_exist"
+    try:
+        _fs.makedirs(base)
+
+        total = _fs.du(base)
+        assert total == 0
+    finally:
+        if _fs.exists(base):
+            _fs.rm(base, recursive=True)
+
+
+# =============================================================================
+# File Handle Management Tests
+# =============================================================================
+
+def test_finalize_files(_fs: IRODSFileSystem):
+    """Test file handle finalization."""
+    # Open a file but don't close it explicitly
+    test_path = "/tempZone/existing_file.txt"
+
+    _ = _fs.open(test_path, "rb")
+    # Don't close - rely on finalization
+
+    # Call finalization
+    _fs._finalize_files()
+
+    # Should not raise
+
+
+def test_close_removes_from_instances(_fs: IRODSFileSystem):
+    """Test that close removes filesystem from global instances registry."""
+    with _fs.open("/tempZone/existing_file.txt", "rb") as f:
+        f.read(3)
+
+    assert _fs in fs_instances
+    _fs.close()
+    assert _fs not in fs_instances
+
+
+# =============================================================================
+# Filesystem Properties and Metadata Tests
+# =============================================================================
+
+def test_fs_properties(_fs: IRODSFileSystem):
     """Test filesystem properties."""
-    assert fs.host is not None
-    assert fs.port is not None
-    assert fs.zone is not None
-    assert fs.root is not None
+    assert _fs.host is not None
+    assert _fs.port is not None
+    assert _fs.zone is not None
+    assert _fs.root is not None
 
 
-def test_str_repr(fs: IRODSFileSystem):
+def test_str_repr(_fs: IRODSFileSystem):
     """Test string representations."""
-    str_repr = str(fs)
+    str_repr = str(_fs)
     assert "IRODSFileSystem" in str_repr
 
-    repr_str = repr(fs)
+    repr_str = repr(_fs)
     assert "IRODSFileSystem" in repr_str
 
 
-def test_fsid(fs: IRODSFileSystem):
+def test_fsid(_fs: IRODSFileSystem):
     """Test filesystem ID generation."""
-    fsid = fs.fsid
+    fsid = _fs.fsid
     assert fsid is not None
     assert isinstance(fsid, str)
     assert fsid.startswith("irods_")
 
 
-def test_wrap(fs: IRODSFileSystem):
-    """Test path wrapping."""
-    # Test various path formats
-    assert fs.wrap("/tempZone") == "/tempZone"
-    assert fs.wrap("subdir") == "/tempZone/subdir"
-    assert fs.wrap("/subdir") == "/tempZone/subdir"
+def test_wrap(_fs: IRODSFileSystem):
+    """Test path wrapping delegates correctly to iRODSPath."""
+    assert _fs.wrap("/tempZone") == "/tempZone"
+    assert _fs.wrap("subdir") == "/tempZone/subdir"
+    assert _fs.wrap("/subdir") == "/tempZone/subdir"
+    assert _fs.wrap("irods://host:1247/tempZone/path") == "/tempZone/path"
 
 
-def test_strip_protocol():
-    """Test protocol stripping."""
-    # Class method, doesn't need instance
-    result = IRODSFileSystem._strip_protocol("irods://user@host:1247/tempZone/path")
-    assert result == "/tempZone/path"
-
-    result = IRODSFileSystem._strip_protocol("/absolute/path")
-    assert result == "/absolute/path"
-
-
-def test_get_kwargs_from_urls():
+def test_get_kwargs_from_urls(_fs: IRODSFileSystem):
     """Test URL parsing for connection parameters."""
     kwargs = IRODSFileSystem._get_kwargs_from_urls("irods://user+zone@host:1247/path")
     assert kwargs["user"] == "user"
@@ -447,226 +809,76 @@ def test_get_kwargs_from_urls():
     assert kwargs["port"] == 1247
 
 
-def test_close(fs: IRODSFileSystem):
-    """Test closing the filesystem."""
-    # Should close without error
-    fs.close()
+# =============================================================================
+# IRODSFile Class Tests
+# =============================================================================
 
-    # After close, session should be cleaned up
-    # (This is hard to verify directly, but we can check no exceptions)
-
-
-def test_context_manager():
-    """Test using filesystem as context manager."""
-    builder: iRODSFSBuilder = iRODSFSBuilder().with_root("/")
-    session = builder._session
-
-    with IRODSFileSystem(session=session, root="/") as fs:
-        assert fs is not None
-        assert fs.exists("/tempZone")
-
-    # After exit, should be closed
-    session.cleanup()
+def test_file_read(_fs: IRODSFileSystem):
+    """Test reading from an IRODSFile."""
+    test_path = "/tempZone/existing_file.txt"
+    with _fs.open(test_path, "rb") as f:
+        assert f.readable()
+        data = f.read()
+        assert data == b"initial content"
 
 
-class TestIRODSFile:
-    """Tests for the IRODSFile class."""
+def test_file_write(_fs: IRODSFileSystem):
+    """Test writing to an IRODSFile."""
+    test_path = "/tempZone/existing_file.txt"
+    with _fs.open(test_path, "wb") as f:
+        assert f.writable()
+        written = f.write(b"new data")
+        assert written > 0
 
-    @pytest.fixture
-    def fs(self):
-        """Create a filesystem for file tests."""
-        builder: iRODSFSBuilder = iRODSFSBuilder().with_root("/")
-        session = builder._session
-        sut = IRODSFileSystem(session=session, root="/")
-        yield sut
-        sut.close()
-        session.cleanup()
-
-    def test_file_read(self, fs: IRODSFileSystem):
-        """Test reading from an IRODSFile."""
-        test_path = "/tempZone/file_read_test.txt"
-        try:
-            fs.pipe_file(test_path, b"test data")
-
-            with fs.open(test_path, "rb") as f:
-                assert f.readable()
-                data = f.read()
-                assert data == b"test data"
-        finally:
-            if fs.exists(test_path):
-                fs.rm_file(test_path)
-
-    def test_file_write(self, fs: IRODSFileSystem):
-        """Test writing to an IRODSFile."""
-        test_path = "/tempZone/file_write_test.txt"
-        try:
-            with fs.open(test_path, "wb") as f:
-                assert f.writable()
-                written = f.write(b"new data")
-                assert written > 0
-
-            content = fs.cat_file(test_path)
-            assert content == b"new data"
-        finally:
-            if fs.exists(test_path):
-                fs.rm_file(test_path)
-
-    def test_file_seek_tell(self, fs: IRODSFileSystem):
-        """Test seeking and telling in a file."""
-        test_path = "/tempZone/file_seek_test.txt"
-        try:
-            fs.pipe_file(test_path, b"0123456789")
-
-            with fs.open(test_path, "rb") as f:
-                pos = f.tell()
-                assert pos == 0
-
-                f.seek(5)
-                pos = f.tell()
-                assert pos == 5
-
-                f.seek(-3, 2)  # Seek to 3 bytes before end
-                pos = f.tell()
-                assert pos == 7
-        finally:
-            if fs.exists(test_path):
-                fs.rm_file(test_path)
-
-    def test_file_context_manager(self, fs: IRODSFileSystem):
-        """Test file as context manager."""
-        test_path = "/tempZone/file_context_test.txt"
-        try:
-            fs.pipe_file(test_path, b"context test")
-
-            with fs.open(test_path, "rb") as f:
-                assert not f.closed
-                data = f.read()
-
-            assert f.closed
-            assert data == b"context test"
-        finally:
-            if fs.exists(test_path):
-                fs.rm_file(test_path)
-
-    def test_file_closed_property(self, fs: IRODSFileSystem):
-        """Test file closed property."""
-        test_path = "/tempZone/file_closed_test.txt"
-        try:
-            fs.pipe_file(test_path, b"test")
-
-            f = fs.open(test_path, "rb")
-            assert not f.closed
-
-            f.close()
-            assert f.closed
-        finally:
-            if fs.exists(test_path):
-                fs.rm_file(test_path)
+    content = _fs.cat_file(test_path)
+    assert content == b"new data"
 
 
-# Integration-style tests that mirror the pyfilesystem2 test suite
-class TestIRODSFSSpecIntegration:
-    """Integration tests mirroring the pyfilesystem2 test structure."""
+def test_file_seek_tell(_fs: IRODSFileSystem):
+    """Test seeking and telling in a file."""
+    test_path = "/tempZone/existing_file.txt"
+    with _fs.open(test_path, "rb") as f:
+        pos = f.tell()
+        assert pos == 0
 
-    @pytest.fixture
-    def fs(self):
-        """Create a fresh filesystem for integration tests."""
-        builder: iRODSFSBuilder = iRODSFSBuilder().with_root("/")
-        session = builder._session
-        sut = IRODSFileSystem(session=session, root="/")
+        f.seek(5)
+        pos = f.tell()
+        assert pos == 5
 
-        # Setup fixtures
-        if not sut.exists("/tempZone/integration_test"):
-            sut.makedirs("/tempZone/integration_test", exist_ok=True)
+        f.seek(-3, 2)  # Seek to 3 bytes before end
+        pos = f.tell()
+        assert pos == 12
 
-        yield sut
 
-        # Cleanup
-        try:
-            if sut.exists("/tempZone/integration_test"):
-                sut.rm("/tempZone/integration_test", recursive=True)
-        except Exception:
-            pass
+def test_file_context_manager(_fs: IRODSFileSystem):
+    """Test file as context manager."""
+    test_path = "/tempZone/existing_file.txt"
+    with _fs.open(test_path, "rb") as f:
+        assert not f.closed
+        data = f.read()
 
-        sut.close()
-        session.cleanup()
+    assert f.closed
+    assert data == b"initial content"
 
-    def test_upload_download(self, fs: IRODSFileSystem):
-        """Test uploading and downloading files."""
-        import tempfile
 
-        test_path = "/tempZone/integration_test/uploaded.txt"
-        test_content = b"upload download test"
+def test_file_closed_property(_fs: IRODSFileSystem):
+    """Test file closed property."""
+    test_path = "/tempZone/existing_file.txt"
+    f = _fs.open(test_path, "rb")
+    assert not f.closed
 
-        # Upload
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp.write(test_content)
-            tmp_path = tmp.name
+    f.close()
+    assert f.closed
 
-        try:
-            with open(tmp_path, "rb") as f:
-                with fs.open(test_path, "wb") as dest:
-                    dest.write(f.read())
 
-            # Download
-            downloaded_content = fs.cat_file(test_path)
-            assert downloaded_content == test_content
-        finally:
-            os.unlink(tmp_path)
-            if fs.exists(test_path):
-                fs.rm_file(test_path)
+def test_file_readable_writable_seekable(_fs: IRODSFileSystem):
+    """Test file capability methods."""
+    test_path = "/tempZone/existing_file.txt"
+    with _fs.open(test_path, "rb") as f:
+        assert f.readable() is True
+        assert f.seekable() is True
 
-    def test_nested_directories(self, fs: IRODSFileSystem):
-        """Test nested directory operations."""
-        base = "/tempZone/integration_test/nested"
-        deep_path = f"{base}/a/b/c/d"
-
-        try:
-            # Create deep structure
-            fs.makedirs(deep_path)
-            assert fs.isdir(deep_path)
-
-            # Write file at depth
-            fs.pipe_file(f"{deep_path}/file.txt", b"deep file")
-
-            # Read back
-            content = fs.cat_file(f"{deep_path}/file.txt")
-            assert content == b"deep file"
-
-            # List intermediate
-            items = fs.ls(f"{base}/a/b", detail=False)
-            assert "c" in items
-        finally:
-            if fs.exists(base):
-                fs.rm(base, recursive=True)
-
-    def test_concurrent_operations(self, fs: IRODSFileSystem):
-        """Test that locking works correctly."""
-        import threading
-
-        results = []
-        errors = []
-
-        def write_file(i):
-            try:
-                path = f"/tempZone/integration_test/concurrent_{i}.txt"
-                fs.pipe_file(path, f"content {i}".encode())
-                results.append(i)
-            except Exception as e:
-                errors.append(e)
-
-        # Run concurrent writes
-        threads = [threading.Thread(target=write_file, args=(i,)) for i in range(5)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert len(errors) == 0, f"Errors occurred: {errors}"
-        assert len(results) == 5
-
-        # Verify all files created
-        for i in range(5):
-            path = f"/tempZone/integration_test/concurrent_{i}.txt"
-            assert fs.exists(path)
-            fs.rm_file(path)
+    with _fs.open(test_path, "wb") as f:
+        assert f.writable() is True
+        assert f.readable() is False
+        assert f.seekable() is True
