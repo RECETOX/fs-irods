@@ -1005,7 +1005,7 @@ class IRODSFileSystem(AbstractFileSystem):
         Args:
             path: Path to start walking from.
             maxdepth: Maximum depth to traverse.
-            topdown: Directrion of traversal.
+            topdown: Direction of traversal.
             on_error: Error handling strategy.
             **kwargs: Additional keyword arguments.
 
