@@ -24,6 +24,11 @@
 
 PyFilesystem2 extension for iRODS
 
+This package provides two filesystem implementations:
+
+1. **iRODSFS** - PyFilesystem2 (fs) compatible implementation
+2. **IRODSFileSystem** - fsspec compatible implementation
+
 The project setup is documented in [project_setup.md](project_setup.md). Feel free to remove this document (and/or the link to this document) if you don't need it.
 
 ## Installation
@@ -34,6 +39,100 @@ To install fs_irods from GitHub repository, do:
 git clone git@github.com:RECETOX/fs-irods.git
 cd fs-irods
 python -m pip install .
+```
+
+For fsspec support, also install fsspec:
+
+```console
+python -m pip install fsspec
+```
+
+## Usage
+
+### PyFilesystem2 (iRODSFS)
+
+```python
+from irods.session import iRODSSession
+from fs_irods import iRODSFS
+
+# Create an iRODS session
+session = iRODSSession(
+    host='localhost',
+    port=1247,
+    user='rods',
+    password='rods',
+    zone='tempZone'
+)
+
+# Create the filesystem
+fs = iRODSFS(session, root='/tempZone/home/rods')
+
+# Use with PyFilesystem2 API
+fs.listdir('/')
+fs.readbytes('/some/file.txt')
+fs.writebytes('/new/file.txt', b'content')
+fs.close()
+session.cleanup()
+```
+
+### fsspec (IRODSFileSystem)
+
+```python
+from irods.session import iRODSSession
+from fs_irods import IRODSFileSystem
+
+# Option 1: Reuse an existing session
+session = iRODSSession(
+    host='localhost',
+    port=1247,
+    user='rods',
+    password='rods',
+    zone='tempZone'
+)
+fs = IRODSFileSystem(session=session, root='/tempZone/home/rods')
+
+# Option 2: Provide connection parameters directly
+fs = IRODSFileSystem(
+    host='localhost',
+    port=1247,
+    user='rods',
+    password='rods',
+    zone='tempZone',
+    root='/tempZone/home/rods'
+)
+
+# Option 3: Use a connection string
+fs = IRODSFileSystem('irods://rods+tempZone@localhost:1247/tempZone/home/rods')
+
+# Use with fsspec API
+fs.ls('/tempZone/home/rods')
+fs.cat_file('/some/file.txt')
+fs.pipe_file('/new/file.txt', b'content')
+
+# Or use as context manager
+with IRODSFileSystem(session=session) as fs:
+    data = fs.cat_file('/path/to/file.txt')
+
+fs.close()
+session.cleanup()
+```
+
+### Using with other libraries
+
+The fsspec implementation can be used with any library that supports fsspec:
+
+```python
+import pandas as pd
+from fs_irods import IRODSFileSystem
+
+fs = IRODSFileSystem(host='localhost', port=1247, user='rods',
+                     password='rods', zone='tempZone')
+
+# Read CSV directly from iRODS
+df = pd.read_csv('irods:///tempZone/data/file.csv', storage_options={'fs': fs})
+
+# Write parquet to iRODS
+df.to_parquet('irods:///tempZone/output/data.parquet', storage_options={'fs': fs})
 ```
 
 ## Documentation
